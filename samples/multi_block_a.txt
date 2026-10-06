@@ -1,0 +1,6 @@
+start
+del1_apple
+del2_banana
+del3_cherry
+end
+

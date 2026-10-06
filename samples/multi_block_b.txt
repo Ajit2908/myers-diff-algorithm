@@ -1,0 +1,5 @@
+start
+ins1_application
+ins2_bandana
+end
+
