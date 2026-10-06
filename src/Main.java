@@ -12,6 +12,7 @@ import java.util.List;
 
 public class Main {
 
+    // Holds line byte boundaries (starts, lens) within the raw byte buffer.
     static class RawLines {
         final byte[] data;
         final int[] starts;
@@ -26,6 +27,8 @@ public class Main {
         }
     }
 
+    // Maps unique line byte sequences to integer IDs so Myers can compare
+    // lines with fast O(1) integer equality instead of byte-by-byte comparisons.
     static class LineTable {
         private final int mask;
         private final int[] head;
@@ -80,6 +83,7 @@ public class Main {
         }
     }
 
+    // Represents a diagonal match segment (snake) starting at (x, y) of length len.
     static class Snake {
         final int x;
         final int y;
@@ -92,6 +96,8 @@ public class Main {
         }
     }
 
+    // Splits raw bytes on '\n' (0x0A), preserving '\r' (CRLF vs LF distinction).
+    // Drops any trailing empty piece so a final newline does not create a false extra line.
     static RawLines parseLines(byte[] data) {
         if (data == null || data.length == 0) {
             return new RawLines(data, new int[0], new int[0], 0);
@@ -131,6 +137,7 @@ public class Main {
         return new RawLines(data, starts, lens, lineCount);
     }
 
+    // Writes a diff line: prefix (' ' keep, '-' delete, '+' insert) + original bytes + '\n'.
     private static void writeLine(OutputStream out, byte prefix, byte[] data, int start, int len) throws IOException {
         out.write(prefix);
         if (len > 0) {
@@ -145,6 +152,8 @@ public class Main {
         out.write(0x0A);
     }
 
+    // Formats changed indices into 0-based half-open ranges "start-end" (e.g. 3-5).
+    // Merges adjacent/touching changes, and outputs "." if no characters changed.
     private static String formatRanges(boolean[] changed) {
         if (changed == null || changed.length == 0) {
             return ".";
@@ -170,6 +179,8 @@ public class Main {
         return first ? "." : sb.toString();
     }
 
+    // Computes Part B character diff using Unicode code points so emojis count as 1 character.
+    // '\r' is retained and counts as a character; newlines are excluded.
     private static String computeHighlight(byte[] dataA, int sA, int lA, byte[] dataB, int sB, int lB) {
         String strA = new String(dataA, sA, lA, StandardCharsets.UTF_8);
         String strB = new String(dataB, sB, lB, StandardCharsets.UTF_8);
@@ -179,13 +190,11 @@ public class Main {
         int nA = cpA.length;
         int nB = cpB.length;
 
-        // Common prefix
         int p = 0;
         while (p < nA && p < nB && cpA[p] == cpB[p]) {
             p++;
         }
 
-        // Common suffix
         int s = 0;
         while (s < nA - p && s < nB - p && cpA[nA - 1 - s] == cpB[nB - 1 - s]) {
             s++;
@@ -198,7 +207,7 @@ public class Main {
         int mTrimmed = nB - p - s;
 
         if (nTrimmed == 0 && mTrimmed == 0) {
-            // Identical lines - nothing changed
+            // Identical lines
         } else if (nTrimmed == 0) {
             for (int j = p; j < nB - s; j++) {
                 changedB[j] = true;
@@ -241,6 +250,8 @@ public class Main {
         return "? " + rangesA + " | " + rangesB;
     }
 
+    // Overall pipeline: read raw bytes -> parse lines -> intern to IDs -> trim prefix/suffix
+    // -> run Myers diff -> emit change blocks (delete-first) -> optionally compute highlights.
     public static void main(String[] args) {
         if (args.length != 3 || (!args[0].equals("lines") && !args[0].equals("highlight"))) {
             System.err.println("Usage: Main <lines|highlight> <fileA> <fileB>");
@@ -267,7 +278,6 @@ public class Main {
         RawLines rawA = parseLines(dataA);
         RawLines rawB = parseLines(dataB);
 
-        // Assign integer IDs to distinct lines
         int totalLines = rawA.count + rawB.count;
         LineTable table = new LineTable(totalLines);
         int[] aIds = new int[rawA.count];
@@ -279,13 +289,11 @@ public class Main {
             bIds[j] = table.getOrAdd((byte) 1, rawB.data, rawB.starts[j], rawB.lens[j], dataA, dataB);
         }
 
-        // Common prefix trimming
         int p = 0;
         while (p < rawA.count && p < rawB.count && aIds[p] == bIds[p]) {
             p++;
         }
 
-        // Common suffix trimming
         int s = 0;
         while (s < rawA.count - p && s < rawB.count - p && aIds[rawA.count - 1 - s] == bIds[rawB.count - 1 - s]) {
             s++;
@@ -295,25 +303,21 @@ public class Main {
         int mTrimmed = rawB.count - p - s;
 
         try (OutputStream out = new BufferedOutputStream(System.out, 65536)) {
-            // 1. Output common prefix keep lines
             for (int i = 0; i < p; i++) {
                 writeLine(out, (byte) ' ', rawA.data, rawA.starts[i], rawA.lens[i]);
             }
 
             if (nTrimmed == 0 && mTrimmed == 0) {
-                // Files are identical or diff fully covered by prefix/suffix
+                // Fully identical or covered by prefix/suffix
             } else if (nTrimmed == 0) {
-                // All lines in trimmed B are inserted (unpaired, so no highlight lines)
                 for (int j = p; j < rawB.count - s; j++) {
                     writeLine(out, (byte) '+', rawB.data, rawB.starts[j], rawB.lens[j]);
                 }
             } else if (mTrimmed == 0) {
-                // All lines in trimmed A are deleted (unpaired, so no highlight lines)
                 for (int i = p; i < rawA.count - s; i++) {
                     writeLine(out, (byte) '-', rawA.data, rawA.starts[i], rawA.lens[i]);
                 }
             } else {
-                // Myers diff on trimmed portion
                 int[] aTrimmed = new int[nTrimmed];
                 System.arraycopy(aIds, p, aTrimmed, 0, nTrimmed);
                 int[] bTrimmed = new int[mTrimmed];
@@ -326,15 +330,15 @@ public class Main {
                 for (Snake snake : snakes) {
                     int delCount = snake.x - currX;
 
-                    // Deletions first in this change block
+                    // Delete-first rule: emit all '-' before any '+' in a change block
                     for (int x = currX; x < snake.x; x++) {
                         writeLine(out, (byte) '-', rawA.data, rawA.starts[p + x], rawA.lens[p + x]);
                     }
-                    // Insertions second in this change block
                     for (int y = currY; y < snake.y; y++) {
                         writeLine(out, (byte) '+', rawB.data, rawB.starts[p + y], rawB.lens[p + y]);
                         if (highlight) {
                             int pairIdx = y - currY;
+                            // Pair j-th deletion with j-th insertion in this change block
                             if (pairIdx < delCount) {
                                 int oldLineIdx = p + currX + pairIdx;
                                 int newLineIdx = p + y;
@@ -344,7 +348,6 @@ public class Main {
                             }
                         }
                     }
-                    // Snake keep lines
                     for (int i = 0; i < snake.len; i++) {
                         writeLine(out, (byte) ' ', rawA.data, rawA.starts[p + snake.x + i], rawA.lens[p + snake.x + i]);
                     }
@@ -352,7 +355,6 @@ public class Main {
                     currY = snake.y + snake.len;
                 }
 
-                // Final change block after the last snake
                 int delCount = nTrimmed - currX;
                 for (int x = currX; x < nTrimmed; x++) {
                     writeLine(out, (byte) '-', rawA.data, rawA.starts[p + x], rawA.lens[p + x]);
@@ -372,7 +374,6 @@ public class Main {
                 }
             }
 
-            // 4. Output common suffix keep lines
             for (int i = rawA.count - s; i < rawA.count; i++) {
                 writeLine(out, (byte) ' ', rawA.data, rawA.starts[i], rawA.lens[i]);
             }
@@ -384,6 +385,15 @@ public class Main {
         }
     }
 
+    /*
+     * Myers' O(ND) greedy diff algorithm:
+     * - Edit graph: horizontal step (x+1, y) = delete from A, vertical step (x, y+1) = insert from B.
+     * - Diagonal k = x - y: delete moves from k-1 to k; insert moves from k+1 to k.
+     * - v[offset + k] stores the furthest x reached on diagonal k at edit distance d.
+     * - Snake: greedily extends along the diagonal (x+1, y+1) while elements match (free cost).
+     * - Iterating d = 0, 1, 2... guarantees finding the minimal edit distance first.
+     * - vHistory records active slices per step d to backtrack the path without copying full arrays.
+     */
     private static List<Snake> runMyers(int[] a, int[] b) {
         int n = a.length;
         int m = b.length;
@@ -395,7 +405,6 @@ public class Main {
 
         List<int[]> vHistory = new ArrayList<>();
 
-        // d = 0
         int x0 = 0;
         while (x0 < n && x0 < m && a[x0] == b[x0]) {
             x0++;
@@ -434,7 +443,7 @@ public class Main {
             }
         }
 
-        // Backtrack to extract snakes
+        // Backtrack through vHistory from finalD down to 1 to recover matching snakes
         List<Snake> snakes = new ArrayList<>();
         int currX = n;
         int currY = m;
